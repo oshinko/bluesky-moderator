@@ -489,5 +489,5 @@ runJudgeTask(judgeFrequency);
 
 app.listen(
   process.env.PORT,
-  () => console.info(`App listening on port ${process.env.PORT}`)
+  () => console.info('App listening on port', process.env.PORT)
 ).on('error', error => { throw new Error(error.message) });
