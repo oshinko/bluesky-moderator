@@ -11,10 +11,9 @@ const SOCIAL_FILENAME = 'social.json';
 const CONFIG_FILENAME = 'config.json';
 const STATE_FILENAME = 'state.json';
 
-const DEFAULT_SESSION_AGE = 3 * 24 * 60 * 60 * 1000;  // 3d
+const DEFAULT_SESSION_AGE = 3 * 24 * 60 * 60 * 1000;    // 3d
 const DEFAULT_SOCIAL_SESSION_AGE = 1 * 60 * 60 * 1000;  // 1h
-
-const DEFAULT_JUDGE_FREQUENCY = 1 * 60 * 60 * 1000;  // 1h
+const DEFAULT_JUDGE_FREQUENCY = 1 * 60 * 60 * 1000;     // 1h
 
 if (
   !process.env.SALT || !process.env.DEFAULT_INSTRUCTION_PROMPT_FILE ||
@@ -99,18 +98,18 @@ console.time('chat/completions');
           type: 'function',
           function: {
             name: 'delete',
-            description: '投稿を削除します。',
+            description: 'Delete the post',
             parameters: {
               type: 'object',
-              description: '対象の投稿',
+              description: 'Target post',
               properties: {
                 uri: {
                   type: 'string',
-                  description: '投稿の URI'
+                  description: 'URI of the post'
                 },
                 cause: {
                   type: 'string',
-                  description: '対象となった理由'
+                  description: 'Cause of the target'
                 }
               },
               required: ['uri', 'cause'],
@@ -122,18 +121,18 @@ console.time('chat/completions');
           type: 'function',
           function: {
             name: 'report',
-            description: '投稿を報告します。',
+            description: 'Report the post',
             parameters: {
               type: 'object',
-              description: '対象の投稿',
+              description: 'Target post',
               properties: {
                 uri: {
                   type: 'string',
-                  description: '投稿の URI'
+                  description: 'URI of the post'
                 },
                 cause: {
                   type: 'string',
-                  description: '対象となった理由'
+                  description: 'Cause of the target'
                 }
               },
               required: ['uri', 'cause'],
@@ -294,7 +293,7 @@ app.post('/dashboard', async (req, res) => {
 
   const stateFile =
     stateFileFormat.replace(/{session}/g, req.cookies.session);
-  const state = await loadJson(stateFile);
+  const state = await loadJson(stateFile) ?? {};
   state.judgeSince = judgeSince;
   await dumpJson(state, stateFile);
 
@@ -471,7 +470,7 @@ function runJudgeTask(frequency: number, options = { heartbeats: [5000, 10000, 1
         if (targetPost) {
           console.debug('# target post', JSON.stringify(targetPost, null, 2));
           console.debug('Judge post');
-          // await judge(config.data.genai, targetPost);
+          await judge(config.data.genai, targetPost);
           state.data.judgeSince =
             new Date(targetPost.record.createdAt.getTime() + 1);
         }
@@ -488,9 +487,7 @@ function runJudgeTask(frequency: number, options = { heartbeats: [5000, 10000, 1
 }
 runJudgeTask(judgeFrequency);
 
-app.listen(process.env.PORT, () => {
-  console.info(`App listening on port ${process.env.PORT}`);
-}).on('error', (error) => {
-  // エラーの処理
-  throw new Error(error.message);
-});
+app.listen(
+  process.env.PORT,
+  () => console.info(`App listening on port ${process.env.PORT}`)
+).on('error', error => { throw new Error(error.message) });
