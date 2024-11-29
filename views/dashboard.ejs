@@ -1,0 +1,77 @@
+<%
+  title = 'Dashboard - Bluesky Moderator';
+%>
+
+<%- include('header') %>
+
+<p>
+  Hello, <%= social.profile.displayName %>!
+</p>
+
+<form method="POST" action="/dashboard" onsubmit="return update(this)" class="max-w-2xl my-2">
+  <input type="hidden" name="judgeSince">
+
+  <fieldset class="my-2">
+    <legend>GenAI Configuration</legend>
+
+    <fieldset class="mt-0">
+      <legend>Chat Completions API Endpoint</legend>
+      <input
+        name="genaiChatCompletionsApiEndpoint"
+        type="text"
+        placeholder="https://api.openai.com/v1/chat/completions"
+        value="<%= config?.genai.chatCompletionsApiEndpoint || 'https://api.openai.com/v1/chat/completions' %>"
+        class="w-full"
+      >
+      <p class="m-0 mt-2 text-gray-800 text-xs">Enter OpenAI Chat Completions API compatibility.</p>
+    </fieldset>
+
+    <fieldset class="my-2">
+      <legend>API Key</legend>
+      <input name="genaiApiKey" type="text" placeholder="Your API Key" value="<%= config?.genai.apiKey %>" class="w-full">
+    </fieldset>
+
+    <fieldset class="my-2">
+      <legend>Model</legend>
+      <input name="genaiModel" type="text" placeholder="gpt-4o" value="<%= config?.genai.model || 'gpt-4o' %>" class="w-full">
+    </fieldset>
+  </fieldset>
+
+  <fieldset class="my-2">
+    <legend>Instruction Prompt</legend>
+    <textarea name="instructionPrompt" class="h-96 w-full"><%= config?.instructionPrompt || defaultInstructionPrompt %></textarea>
+  </fieldset>
+
+  <fieldset class="my-2">
+    <legend>Judge Since</legend>
+    <input id="current-start-time-tmp" type="datetime-local" step=".001">
+    <p class="m-0 mt-2 text-gray-800 text-xs">Posts made after this will be subject to judgment.</p>
+  </fieldset>
+
+  <button class="mt-2 p-1.5">Update</button>
+</form>
+
+<% if (state?.judgeSince) { %>
+<script>
+const judgeSince = new Date('<%= state?.judgeSince?.toISOString() %>');
+const year = judgeSince.getFullYear();
+const month = ('0' + (judgeSince.getMonth() + 1)).slice(-2);
+const date = ('0' + judgeSince.getDate()).slice(-2);
+const hour = ('0' + judgeSince.getHours()).slice(-2);
+const min = ('0' + judgeSince.getMinutes()).slice(-2);
+const sec = ('0' + judgeSince.getSeconds()).slice(-2);
+const ms = ('00' + judgeSince.getMilliseconds()).slice(-3);
+const judgeSinceStr = `${year}-${month}-${date}T${hour}:${min}:${sec}.${ms}`;
+document.querySelector('#current-start-time-tmp').value = judgeSinceStr;
+</script>
+<% } %>
+
+<script>
+function update(form) {
+  const tmp = form.querySelector('#current-start-time-tmp');
+  form.judgeSince.value = new Date(tmp.value).toISOString();
+  return true;
+}
+</script>
+
+<%- include('footer') %>

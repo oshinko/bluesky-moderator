@@ -1,0 +1,17 @@
+services:
+  server:
+    build: .
+    image: bluesky-moderator
+    container_name: bluesky-moderator
+    environment:
+      PORT: 8000
+      SALT: ${SALT}
+      JUDGE_FREQUENCY: ${JUDGE_FREQUENCY}
+      DEFAULT_INSTRUCTION_PROMPT_FILE: ${DEFAULT_INSTRUCTION_PROMPT_FILE}
+      DEFAULT_USER_PROMPT_FILE: ${DEFAULT_USER_PROMPT_FILE}
+    ports:
+      - '${PORT}:8000'
+    volumes:
+      - .:/app
+      - /app/node_modules  # volume trick
+    restart: unless-stopped

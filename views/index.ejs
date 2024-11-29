@@ -1,0 +1,23 @@
+<%
+  title = 'Bluesky Moderator';
+%>
+
+<%- include('header') %>
+
+<form method="POST" action="/" onsubmit="return update(this)" class="max-w-2xl my-2">
+  <fieldset class="my-2">
+    <legend>Hosting provider</legend>
+    <input name="provider" type="url" autocomplete="url" placeholder="https://bsky.social" value="https://bsky.social" class="w-full">
+  </fieldset>
+
+  <fieldset class="my-2">
+    <legend>Account</legend>
+    <input name="username" type="text" autocomplete="username" placeholder="Username or email" value="" class="w-full">
+    <input name="password" type="password" autocomplete="password" placeholder="App Password" value="" class="w-full">
+    <p class="m-0 mt-2 text-gray-800 text-xs">Enter your username and password</p>
+  </fieldset>
+
+  <button class="mt-2 p-1.5">Sign in</button>
+</form>
+
+<%- include('footer') %>
