@@ -30,6 +30,27 @@ async function dumpJson(data: any, file: string) {
   await fs.writeFile(file, JSON.stringify(data, null, 2));
 }
 
+function createUrl(
+  url: string | URL,
+  {
+    base,
+    params
+  }: {
+    base?: string | URL,
+    params?: string | URLSearchParams | any
+  } = {}
+): URL {
+  const result = new URL(url, base);
+  if (params) {
+    if (typeof params === 'string') params = new URLSearchParams(params);
+    const iter = params instanceof URLSearchParams ?
+      params.entries() :
+      Object.entries<any>(params);
+    for (const [k, v] of iter) result.searchParams.set(k, v.toString());
+  }
+  return result;
+}
+
 if (
   !process.env.SALT || !process.env.DEFAULT_INSTRUCTION_PROMPT_FILE ||
   !process.env.DEFAULT_USER_PROMPT_FILE
@@ -55,21 +76,15 @@ if (logFormat && logFormat !== 'false' && logFormat !== 'off') {
     const millis = ('00' + time.getMilliseconds()).slice(-3);
     builtin(`[${time.toLocaleString()}.${millis}]`, message, ...optionalParams);
   }
-
   const builtinConsole = { ...console };
-
   console.log = (message?: any, ...optionalParams: any[]) =>
     _log(builtinConsole.log, message, ...optionalParams);
-
   console.debug = (message?: any, ...optionalParams: any[]) =>
     _log(builtinConsole.debug, message, ...optionalParams);
-
   console.info = (message?: any, ...optionalParams: any[]) =>
     _log(builtinConsole.info, message, ...optionalParams);
-
   console.warn = (message?: any, ...optionalParams: any[]) =>
     _log(builtinConsole.warn, message, ...optionalParams);
-
   console.error = (message?: any, ...optionalParams: any[]) =>
     _log(builtinConsole.error, message, ...optionalParams);
 }
@@ -105,21 +120,22 @@ class JudgeTools {
     for (const post of posts) {
       const [repo, collection, rkey] =
         post.uri.replace(/^at:\/\//, '').split('/');
-      const resp = await fetch(
-        this.social.provider + '/xrpc/com.atproto.repo.deleteRecord',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer ' + this.social.session.accessJwt,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            repo,
-            collection,
-            rkey
-          })
-        }
+      const url = createUrl(
+        '/xrpc/com.atproto.repo.deleteRecord',
+        { base: this.social.provider }
       );
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + this.social.session.accessJwt,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          repo,
+          collection,
+          rkey
+        })
+      });
       if (!resp.ok) {
         const { error, message } = await resp.json();
         throw new Error(error + ': ' + message);
@@ -356,24 +372,26 @@ app.get('/', async (req: Request, res: Response) => {
 
 app.post('/', async (req, res) => {
   const { provider, username: identifier, password } = req.body;
-  const createSessionResp = await fetch(
-    provider + '/xrpc/com.atproto.server.createSession',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, password })
-    }
+  const createSessionUrl = createUrl(
+    '/xrpc/com.atproto.server.createSession',
+    { base: provider }
   );
+  const createSessionResp = await fetch(createSessionUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password })
+  });
   const session = await createSessionResp.json();
   console.debug('Created session', session);
 
-  const getProfileResp = await fetch(
-    provider + '/xrpc/app.bsky.actor.getProfile?actor=' + session.did,
-    {
-      method: 'GET',
-      headers: { Authorization: 'Bearer ' + session.accessJwt }
-    }
+  const getProfileUrl = createUrl(
+    '/xrpc/app.bsky.actor.getProfile',
+    { base: provider, params: { actor: session.did } }
   );
+  const getProfileResp = await fetch(getProfileUrl, {
+    method: 'GET',
+    headers: { Authorization: 'Bearer ' + session.accessJwt }
+  });
   const profile = await getProfileResp.json();
   console.debug('Got profile', profile);
 
@@ -472,13 +490,14 @@ app.post('/dashboard', async (req, res) => {
 });
 
 async function refreshSession(social: any) {
-  const refreshSessionResp = await fetch(
-    social.provider + '/xrpc/com.atproto.server.refreshSession',
-    {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + social.session.refreshJwt }
-    }
+  const refreshSessionUrl = createUrl(
+    '/xrpc/com.atproto.server.refreshSession',
+    { base: social.provider }
   );
+  const refreshSessionResp = await fetch(refreshSessionUrl, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + social.session.refreshJwt }
+  });
   if (!refreshSessionResp.ok) {
     const { error, message } = await refreshSessionResp.json();
     throw new Error(error + ': ' + message);
@@ -491,13 +510,14 @@ async function refreshSession(social: any) {
   if (session.active) social.session.active = session.active;
   if (session.status) social.session.status = session.status;
 
-  const getProfileResp = await fetch(
-    social.provider + '/xrpc/app.bsky.actor.getProfile?actor=' + session.did,
-    {
-      method: 'GET',
-      headers: { Authorization: 'Bearer ' + session.accessJwt }
-    }
+  const getProfileUrl = createUrl(
+    '/xrpc/app.bsky.actor.getProfile',
+    { base: social.provider, params: { actor: session.did } }
   );
+  const getProfileResp = await fetch(getProfileUrl, {
+    method: 'GET',
+    headers: { Authorization: 'Bearer ' + session.accessJwt }
+  });
   if (!getProfileResp.ok) {
     const { error, message } = await getProfileResp.json();
     throw new Error(error + ': ' + message);
@@ -542,12 +562,16 @@ function runRefreshSessionTask(
 runRefreshSessionTask();
 
 async function getJudgeTargetPost({ social, state }: any) {
-  const listPostsUrl = new URL(
+  const listPostsUrl = createUrl(
     '/xrpc/app.bsky.feed.getAuthorFeed',
-    social.data.provider
+    {
+      base: social.data.provider,
+      params: {
+        actor: social.data.profile.did,
+        // limit: 2  // for debug
+      }
+    }
   );
-  listPostsUrl.searchParams.set('actor', social.data.profile.did);
-  // listPostsUrl.searchParams.set('limit', '2');  // for debug
   if (state.data.cursor)
     listPostsUrl.searchParams.set('cursor', state.data.cursor);
 
