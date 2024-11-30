@@ -19,6 +19,6 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "dotenv -e .env -- nodemon --ignore 'data/**/*.json' index.ts"
+    "dev": "dotenv -e .env -- nodemon --ignore \"data/**/*.json*\" index.ts"
   }
 }

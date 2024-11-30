@@ -10,10 +10,25 @@ const SESSION_DIR = 'data/sessions';
 const SOCIAL_FILENAME = 'social.json';
 const CONFIG_FILENAME = 'config.json';
 const STATE_FILENAME = 'state.json';
+const LOGS_FILENAME = 'logs.jsonl';
 
 const DEFAULT_SESSION_AGE = 3 * 24 * 60 * 60 * 1000;    // 3d
 const DEFAULT_SOCIAL_SESSION_AGE = 1 * 60 * 60 * 1000;  // 1h
 const DEFAULT_JUDGE_FREQUENCY = 1 * 60 * 60 * 1000;     // 1h
+
+async function loadJson(file: string) {
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (e) {
+  }
+  if (text) return JSON.parse(text);
+}
+
+async function dumpJson(data: any, file: string) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
 
 if (
   !process.env.SALT || !process.env.DEFAULT_INSTRUCTION_PROMPT_FILE ||
@@ -64,29 +79,75 @@ interface JudgedPost {
   cause: string
 }
 
-async function deletePosts(posts: JudgedPost[]) {
-  console.log('deletePosts: ', posts)
+class JudgeTools {
+  social: any;
+  logs: any;
+
+  constructor({ social, logs }: any) {
+    this.social = social;
+    this.logs = logs;
+  }
+
+  async report(posts: JudgedPost[]) {
+    console.debug(`JudgeTools.report(${JSON.stringify(posts)})`);
+    for (const post of posts) {
+      await this.logs.append({
+        type: 'report',
+        ...post,
+        createdAt: new Date()
+      });
+    }
+    await this.logs.trim();
+  }
+
+  async delete(posts: JudgedPost[]) {
+    console.debug(`JudgeTools.delete(${JSON.stringify(posts)})`);
+    for (const post of posts) {
+      const [repo, collection, rkey] =
+        post.uri.replace(/^at:\/\//, '').split('/');
+      const resp = await fetch(
+        this.social.provider + '/xrpc/com.atproto.repo.deleteRecord',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer ' + this.social.session.accessJwt,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            repo,
+            collection,
+            rkey
+          })
+        }
+      );
+      if (!resp.ok) {
+        const { error, message } = await resp.json();
+        throw new Error(error + ': ' + message);
+      }
+      await this.logs.append({
+        type: 'delete',
+        ...post,
+        createdAt: new Date()
+      });
+    }
+    await this.logs.trim();
+  }
 }
 
-async function reportPosts(posts: JudgedPost[]) {
-  console.log('reportPosts: ', posts)
-}
-
-async function judge(genaiConfig: any, post: any) {
-console.time('chat/completions');
+async function judgeUsingChatCompletions({ config, social, logs, post }: any) {
   const postJson = JSON.stringify(post, null, 2);
-  const resp = await fetch(genaiConfig.chatCompletionsApiEndpoint, {
+  const resp = await fetch(config.genai.chatCompletionsApiEndpoint, {
     method: 'POST',
     headers: {
-      Authorization: 'Bearer ' + genaiConfig.apiKey,
+      Authorization: 'Bearer ' + config.genai.apiKey,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: genaiConfig.model,
+      model: config.genai.model,
       messages: [
         {
           role: 'system',
-          content: genaiConfig.instructionPrompt || defaultInstructionPrompt
+          content: config.instructionPrompt || defaultInstructionPrompt
         },
         {
           role: 'user',
@@ -143,43 +204,147 @@ console.time('chat/completions');
       ]
     })
   });
-  const data = await resp.json();
 
-console.timeEnd('chat/completions');
-console.log(JSON.stringify(data, null, 2));
+  if (!resp.ok) throw new Error(JSON.stringify(await resp.json()));
+
+  const data = await resp.json();
+  console.debug(JSON.stringify(data, null, 2));
 
   const { message } = data.choices[0];
+  const judgeTools = new JudgeTools({ social, logs });
 
   for (const tool of message.tool_calls ?? []) {
     if (tool.type !== 'function') continue;
-    const func = tool.function.name === 'delete' ? deletePosts : reportPosts;
+    const func =
+      tool.function.name === 'delete' ? judgeTools.delete : judgeTools.report;
     const judgedPosts = JSON.parse(tool.function.arguments);
     await func([judgedPosts]);
   }
 }
 
+async function judgeUsingModerations({ config, social, logs, post }: any) {
+  const postJson = JSON.stringify(post, null, 2);
+  const resp = await fetch(config.genai.chatCompletionsApiEndpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer ' + config.genai.apiKey,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: config.genai.model,  // omni-moderation-latest, etc.
+      input: postJson
+    })
+  });
+
+  if (!resp.ok) throw new Error(JSON.stringify(await resp.json()));
+
+  const data = await resp.json();
+  console.debug(JSON.stringify(data, null, 2));
+
+  const result = data.results[0];
+  if (!result.flagged) return;
+
+  const cause = JSON.stringify({
+    categorie: result.categories,
+    category_scores: result.category_scores
+  });
+  await new JudgeTools({ social, logs }).delete([{ uri: post.uri, cause }]);
+}
+
+async function judge({ social, config, logs, post }: any) {
+  return await (
+    config.genai.chatCompletionsApiEndpoint.includes('/moderations') ?
+      judgeUsingModerations :
+      judgeUsingChatCompletions
+  )({ social, config, logs, post});
+}
+
 const socialFileFormat = SESSION_DIR + '/{session}/' + SOCIAL_FILENAME;
 const configFileFormat = SESSION_DIR + '/{session}/' + CONFIG_FILENAME;
 const stateFileFormat = SESSION_DIR + '/{session}/' + STATE_FILENAME;
+const logsFileFormat = SESSION_DIR + '/{session}/' + LOGS_FILENAME;
+
+class Logs {
+  file: string;
+  maxRecords: number;
+
+  constructor(file: string, options: any = { maxRecords: 1024 }) {
+    this.file = file;
+    this.maxRecords = options.maxRecords;
+  }
+
+  private async *readRaw() {
+    let filehandle;
+    try {
+      filehandle = await fs.open(this.file);
+      for await (const line of filehandle.readLines()) {
+        yield line;
+      }
+    } catch (e) {
+      if (
+        !(e instanceof Error) ||
+        !e.message.includes('no such file or directory')
+      ) throw e;
+    } finally {
+      await filehandle?.close();
+    }
+  }
+
+  async *read() {
+    for await (const line of this.readRaw()) {
+      yield JSON.parse(line);
+    }
+  }
+
+  private async appendRaw(line: string) {
+    await fs.appendFile(this.file, line + '\n');
+  }
+
+  async append(record: any) {
+    await this.appendRaw(JSON.stringify(record));
+  }
+
+  async trim() {
+    let lines: string[] = [];
+    for await (const line of this.readRaw()) {
+      lines.push(line);
+      lines = lines.slice(-this.maxRecords);
+    }
+    for (const line of lines) await this.appendRaw(line);
+  }
+}
+
+async function *iterSessionDir() {
+  const dir = await fs.opendir(SESSION_DIR);
+  for await (const dirent of dir) {
+    if (!dirent.isDirectory()) continue;
+    const socialFile = socialFileFormat.replace(/{session}/g, dirent.name);
+    const configFile = configFileFormat.replace(/{session}/g, dirent.name);
+    const stateFile = stateFileFormat.replace(/{session}/g, dirent.name);
+    const logsFile = logsFileFormat.replace(/{session}/g, dirent.name);
+    yield {
+      session: dirent.name,
+      social: {
+        file: socialFile,
+        data: await loadJson(socialFile)
+      },
+      config: {
+        file: configFile,
+        data: await loadJson(configFile)
+      },
+      state: {
+        file: stateFile,
+        data: await loadJson(stateFile) ?? {}
+      },
+      logs: new Logs(logsFile)
+    };
+  }
+}
 
 const app = express();
 app.set('view engine', 'ejs');
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
-
-async function loadJson(file: string) {
-  let text;
-  try {
-    text = await fs.readFile(file, 'utf8');
-  } catch (e) {
-  }
-  if (text) return JSON.parse(text);
-}
-
-async function dumpJson(data: any, file: string) {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(data, null, 2));
-}
 
 app.get('/', async (req: Request, res: Response) => {
   if (req.cookies.session) {
@@ -253,11 +418,17 @@ app.get('/dashboard', async (req, res) => {
   const state = await loadJson(
     stateFileFormat.replace(/{session}/g, req.cookies.session));
   if (state?.judgeSince) state.judgeSince = new Date(state.judgeSince);
+  const logs = new Logs(logsFileFormat.replace(/{session}/g, req.cookies.session));
+  const logRecordLines = [];
+  for await (const record of logs.read()) {
+    logRecordLines.push(JSON.stringify(record));
+  }
   res.render('dashboard', {
     defaultInstructionPrompt,
     social,
     config,
-    state
+    state,
+    logs: logRecordLines.join('\n')
   });
 });
 
@@ -300,31 +471,6 @@ app.post('/dashboard', async (req, res) => {
   res.render('simple-message', { message: 'Successfully updated' });
 });
 
-async function *iterSessionDir() {
-  const dir = await fs.opendir(SESSION_DIR);
-  for await (const dirent of dir) {
-    if (!dirent.isDirectory()) continue;
-    const socialFile = socialFileFormat.replace(/{session}/g, dirent.name);
-    const configFile = configFileFormat.replace(/{session}/g, dirent.name);
-    const stateFile = stateFileFormat.replace(/{session}/g, dirent.name);
-    yield {
-      session: dirent.name,
-      social: {
-        file: socialFile,
-        data: await loadJson(socialFile)
-      },
-      config: {
-        file: configFile,
-        data: await loadJson(configFile)
-      },
-      state: {
-        file: stateFile,
-        data: await loadJson(stateFile) ?? {}
-      }
-    };
-  }
-}
-
 async function refreshSession(social: any) {
   const refreshSessionResp = await fetch(
     social.provider + '/xrpc/com.atproto.server.refreshSession',
@@ -333,7 +479,7 @@ async function refreshSession(social: any) {
       headers: { Authorization: 'Bearer ' + social.session.refreshJwt }
     }
   );
-  if (!refreshSessionResp.ok) {  // FIXME 他のエラーハンドリングもちゃんとする
+  if (!refreshSessionResp.ok) {
     const { error, message } = await refreshSessionResp.json();
     throw new Error(error + ': ' + message);
   }
@@ -364,19 +510,6 @@ async function refreshSession(social: any) {
   return social;
 }
 
-// TODO 削除
-// app.get('/refresh', async (req, res) => {
-//   const did = 'did:plc:i366qcjakngkunxj7meori62';
-//   const sessionKey = crypto.createHash('sha256')
-//     .update(did)
-//     .update(salt)
-//     .digest('base64url');
-//   const socialFile = socialFileFormat.replace(/{session}/g, sessionKey);
-//   const social = await loadJson(socialFile);
-//   await refreshSession(social);
-//   await dumpJson(social, socialFile);
-//   res.end('ok');
-// });
 function runRefreshSessionTask(
   options = { heartbeats: [5000, 10000, 15000, 20000] }
 ) {
@@ -414,14 +547,15 @@ async function getJudgeTargetPost({ social, state }: any) {
     social.data.provider
   );
   listPostsUrl.searchParams.set('actor', social.data.profile.did);
-  listPostsUrl.searchParams.set('limit', '2');
+  // listPostsUrl.searchParams.set('limit', '2');  // for debug
   if (state.data.cursor)
     listPostsUrl.searchParams.set('cursor', state.data.cursor);
 
+  let completed = false;
   let targetPost;
   let contender1;
   let contender2;
-  while (!targetPost) {
+  while (!completed) {
     const resp = await fetch(
       listPostsUrl,
       {
@@ -432,30 +566,42 @@ async function getJudgeTargetPost({ social, state }: any) {
       const { error, message } = await resp.json();
       throw new Error(error + ': ' + message);
     }
-    const items = await resp.json();
-    const { feed, cursor } = items;  // posts in feed in descending order
+    // posts in feed in descending order
+    const { feed, cursor } = await resp.json();
+    if (feed.length === 0) {
+      completed = true;
+      break;
+    }
     for (const { post } of feed) {
       post.record.createdAt = new Date(post.record.createdAt);
       if (post.record.createdAt < state.data.judgeSince) {
         targetPost = contender1?.post;
         state.data.cursor = contender2?.cursor;
+        completed = true;
         break;
       }
       contender2 = contender1;
       contender1 = { post, cursor };
     }
-    if (cursor) listPostsUrl.searchParams.set('cursor', cursor);
-    else listPostsUrl.searchParams.delete('cursor');
+    if (!cursor) {  // last fetch
+      targetPost = contender1?.post;
+      state.data.cursor = contender2?.cursor;
+      break;
+    }
+    listPostsUrl.searchParams.set('cursor', cursor);
   };
 
   return targetPost;
 }
+
 function runJudgeTask(frequency: number, options = { heartbeats: [5000, 10000, 15000, 20000] }) {
   const delay =
     options.heartbeats[Math.floor(Math.random() * options.heartbeats.length)];
   setTimeout(async () => {
     console.info('Run judge task');
-    for await (const { session, social, config, state } of iterSessionDir()) {
+    for await (
+      const { session, social, config, state, logs } of iterSessionDir()
+    ) {
       if (!state.data.judgeSince) continue;
       state.data.judgeSince = new Date(state.data.judgeSince);
       if (state.data.lastJudgeAttempted) {
@@ -470,7 +616,12 @@ function runJudgeTask(frequency: number, options = { heartbeats: [5000, 10000, 1
         if (targetPost) {
           console.debug('# target post', JSON.stringify(targetPost, null, 2));
           console.debug('Judge post');
-          await judge(config.data.genai, targetPost);
+          await judge({
+            social: social.data,
+            config: config.data,
+            logs: logs,
+            post: targetPost
+          });
           state.data.judgeSince =
             new Date(targetPost.record.createdAt.getTime() + 1);
         }
@@ -478,7 +629,7 @@ function runJudgeTask(frequency: number, options = { heartbeats: [5000, 10000, 1
         await dumpJson(state.data, state.file);
       } catch (e) {
         if (!(e instanceof Error)) throw e;
-        console.warn('Session:', session, e.message);
+        console.warn(`Session: ${session}:`, e);
       }
     }
     console.log('Finish judge task');
